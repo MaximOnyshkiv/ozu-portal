@@ -47,7 +47,7 @@ const GMAP = Object.fromEntries((process.env.GROUP_MAP || GAME_GANGS.map(g => g[
 const gidOf = code => { const c = GMAP[code]; return c ? (Object.values(G).find(g => g.code === c) || {}).id : undefined; };
 async function ensureGameGangs() { for (const [code, name, color, boss] of GAME_GANGS) if (!(await db.get('SELECT id FROM groups WHERE code=?', [code])))
   await db.run('INSERT INTO groups(code,name,kind,color,ranks) VALUES(?,?,?,?,?)', [code, name, 'Угруповання', color, JSON.stringify(['Новачок', 'Свій', 'Боєць', 'Бувалий', 'Старший', 'Бригадир', 'Права рука', 'Радник', 'Заступник', boss])]); }
-nova.mount(app, lim, H, { deny: 'Доступ лише для членів угруповань. Вступіть до банди чи мафії в грі — і доступ з\'явиться автоматично.',
+nova.mount(app, lim, H, { db, deny: 'Доступ лише для членів угруповань. Вступіть до банди чи мафії в грі — і доступ з\'явиться автоматично.',
   eligible: c => c.faction_type === 'gang' && !!gidOf(c.faction), startSession,
   async upsert(acc, c, admin) {
     const login = c ? 'nova#' + c.id : 'nova#a' + acc.id, gid = c ? gidOf(c.faction) : null, top = gid ? G[gid].ranks.length : 7;
@@ -166,4 +166,4 @@ async function seed() {
   for (const [t, b, a] of [['[Приклад] На Grove знову гаряче', 'Ballas і Families не поділили Ganton. Мешканцям радять не виходити вночі.', 'Анонім'], ['[Приклад] Синдикат шукає водіїв', 'Кажуть, оплата щедра. Питайте в порту.', 'Дон Петро']])
     await db.run('INSERT INTO news(title,body,author,demo,created_at) VALUES(?,?,?,1,?)', [t, b, a, now()]);
 }
-(async () => { await db.init(SCHEMA, 'ozu.db'); await seed(); const port = process.env.PORT || 3200; app.listen(port, () => console.log('ОЗУ портал: http://localhost:' + port)); })();
+(async () => { await db.init(SCHEMA, 'ozu.db'); await seed(); await nova.start(db); const port = process.env.PORT || 3200; app.listen(port, () => console.log('ОЗУ портал: http://localhost:' + port)); })();
