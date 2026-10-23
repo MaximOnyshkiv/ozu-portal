@@ -1,7 +1,7 @@
 // ОЗУ — портал організованих угруповань (RP). Окрема система, окрема БД, без звʼязку з державними даними.
 const express = require('express'), helmet = require('helmet'), cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit'), bcrypt = require('bcryptjs'), crypto = require('crypto'), path = require('path');
-const db = require('./db');
+const db = require('./db'), nova = require('./nova');
 const now = () => Date.now();
 const SCHEMA = (pg) => { const id = pg ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT', big = pg ? 'BIGINT' : 'INTEGER'; return [
   `CREATE TABLE IF NOT EXISTS groups(id ${id}, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, color TEXT, motto TEXT, about TEXT, recruiting INTEGER NOT NULL DEFAULT 1, ranks TEXT, demo INTEGER NOT NULL DEFAULT 0)`,
@@ -33,11 +33,29 @@ const member = (q, r) => { if (!q.u) { r.status(401).json({ error: 'Потріб
 const pub = u => u && ({ id: u.id, login: u.login, nick: u.nick, group_id: u.group_id, rank: u.rank, role: u.role });
 
 const lim = rateLimit({ windowMs: 10 * 60e3, max: 30 });
+async function startSession(r, uid) { const t = crypto.randomBytes(32).toString('hex'); await db.run('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)', [sha(t), uid, now() + 14 * 864e5]);
+  r.cookie('oz', t, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 14 * 864e5 }); }
 app.post('/api/login', lim, H(async (q, r) => {
-  const u = await db.get("SELECT * FROM users WHERE login=? AND status='active'", [String(q.body.login || '').trim().toLowerCase()]);
-  if (!u || !bcrypt.compareSync(String(q.body.password || ''), u.pass_hash)) return r.status(401).json({ error: 'Невірний логін або пароль' });
-  const t = crypto.randomBytes(32).toString('hex'); await db.run('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?,?,?)', [sha(t), u.id, now() + 14 * 864e5]);
-  r.cookie('oz', t, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 14 * 864e5 }); r.json({ ok: 1 }); }));
+  const login = String(q.body.login || '').trim().toLowerCase();
+  if (!nova.localAllowed() && login !== String(process.env.ADMIN_LOGIN || '').toLowerCase()) return r.status(400).json({ error: 'Увійдіть через ігровий акаунт NovaRP' });
+  const u = await db.get("SELECT * FROM users WHERE login=? AND status='active'", [login]);
+  if (!u || u.pass_hash === '!nova' || !bcrypt.compareSync(String(q.body.password || ''), u.pass_hash)) return r.status(401).json({ error: 'Невірний логін або пароль' });
+  await startSession(r, u.id); r.json({ ok: 1 }); }));
+// --- вхід через гру: угруповання гри -> угруповання ОЗУ (GROUP_MAP="lviv:lviv,...") ---
+const GAME_GANGS = [['lviv', 'Львівське угруповання', '#2ecc71', 'Пан Господар'], ['kyiv', 'Синдикат', '#f1c40f', 'Пахан'], ['kharkiv', 'Харківське угруповання', '#3498db', 'Голова'], ['dnipro', 'Дніпровське угруповання', '#9b59b6', 'Батя']];
+const GMAP = Object.fromEntries((process.env.GROUP_MAP || GAME_GANGS.map(g => g[0] + ':' + g[0]).join(',')).split(',').map(s => s.split(':').map(x => x.trim())));
+const gidOf = code => { const c = GMAP[code]; return c ? (Object.values(G).find(g => g.code === c) || {}).id : undefined; };
+async function ensureGameGangs() { for (const [code, name, color, boss] of GAME_GANGS) if (!(await db.get('SELECT id FROM groups WHERE code=?', [code])))
+  await db.run('INSERT INTO groups(code,name,kind,color,ranks) VALUES(?,?,?,?,?)', [code, name, 'Угруповання', color, JSON.stringify(['Новачок', 'Свій', 'Боєць', 'Бувалий', 'Старший', 'Бригадир', 'Права рука', 'Радник', 'Заступник', boss])]); }
+nova.mount(app, lim, H, { deny: 'Доступ лише для членів угруповань. Вступіть до банди чи мафії в грі — і доступ з\'явиться автоматично.',
+  eligible: c => c.faction_type === 'gang' && !!gidOf(c.faction), startSession,
+  async upsert(acc, c, admin) {
+    const login = c ? 'nova#' + c.id : 'nova#a' + acc.id, gid = c ? gidOf(c.faction) : null, top = gid ? G[gid].ranks.length : 7;
+    const rank = c ? Math.max(1, Math.min(top, c.rank || 1)) : top, role = admin ? 'admin' : (c && c.rank >= 10 ? 'leader' : 'member'), nick = c ? c.name : acc.login + ' (адмін)';
+    const ex = await db.get('SELECT id FROM users WHERE login=?', [login]);
+    if (ex) await db.run("UPDATE users SET nick=?,group_id=?,rank=?,role=?,status='active' WHERE id=?", [nick, gid, rank, role, ex.id]);
+    const id = ex ? ex.id : (await db.run("INSERT INTO users(login,pass_hash,nick,group_id,rank,role,created_at) VALUES(?,'!nova',?,?,?,?,?)", [login, nick, gid, rank, role, now()])).id;
+    await audit(id, gid, 'login.game', `${acc.login} → ${nick}${gid ? ', ' + G[gid].name : ''}, ранг ${rank}${admin ? ', адмін' : ''}`); return id; } });
 app.post('/api/logout', H(async (q, r) => { if (q.cookies.oz) await db.run('DELETE FROM sessions WHERE token_hash=?', [sha(q.cookies.oz)]); r.clearCookie('oz'); r.json({ ok: 1 }); }));
 app.get('/api/me', (q, r) => r.json({ user: pub(q.u), admin: isAdmin(q.u), leader: !!(q.u && q.u.group_id && isLeader(q.u, q.u.group_id)), groups: Object.values(G).map(g => ({ id: g.id, name: g.name, kind: g.kind, color: g.color, ranks: g.ranks })) }));
 // public (guests)
@@ -123,6 +141,7 @@ app.post('/api/admin/turf', H(async (q, r) => { if (!isAdmin(q.u)) return r.stat
 app.get('*', (q, r) => r.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 async function seed() {
+  if (process.env.NOVA_AUTH_URL || process.env.GAME_GANGS === '1') await ensureGameGangs();
   if (process.env.ADMIN_LOGIN && process.env.ADMIN_PASSWORD && !(await db.get('SELECT id FROM users WHERE login=?', [process.env.ADMIN_LOGIN])))
     await db.run("INSERT INTO users(login,pass_hash,nick,role,rank,created_at) VALUES(?,?,?,'admin',7,?)", [process.env.ADMIN_LOGIN, bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10), 'Адмін', now()]);
   if (process.env.SEED_DEMO === '0' || (await db.get('SELECT id FROM groups WHERE demo=1'))) { await loadG(); return; }

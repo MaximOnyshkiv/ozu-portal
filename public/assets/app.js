@@ -33,9 +33,18 @@ async function pageJoin() {
   <form class="card login" id="jf" style="max-width:560px"><label>Угруповання</label><select name="group_id">${open.map(g => `<option value="${g.id}">${esc(g.name)} · ${esc(g.kind)}</option>`).join('')}</select><label>Нік у грі</label><input name="nick" required><label>Контакт</label><input name="contact" placeholder="Discord"><label>Про себе</label><textarea name="about"></textarea><button class="btn" style="width:100%">Надіслати заявку</button></form>`;
   $('#jf').onsubmit = async e => { e.preventDefault(); try { await api('/api/public/apply', form(e.target)); e.target.reset(); toast('Заявку передано лідеру'); } catch (x) { toast(x.message); } };
 }
-function pageLogin() {
-  app.innerHTML = `<form class="card login" id="lf"><div class="veb">Тільки для своїх</div><h1 class="vh" style="font-size:28px">Вхід</h1><label>Логін</label><input name="login"><label>Пароль</label><input name="password" type="password"><button class="btn" style="width:100%">Увійти</button><div class="hint">Акаунт видає лідер угруповання. Демо: demo_boss (лідер), demo_ballas (учасник), demo_don, demo_admin — пароль demo1234.</div></form>`;
-  $('#lf').onsubmit = async e => { e.preventDefault(); try { await api('/api/login', form(e.target)); await boot(); location.hash = ME.user.group_id ? '#/crew' : '#/admin'; } catch (x) { toast(x.message); } };
+async function pageLogin() {
+  let m = { nova: false, local: true }; try { m = await (await fetch('/api/auth/mode')).json(); } catch {}
+  const done = async () => { await boot(); location.hash = ME.user.group_id ? '#/crew' : '#/admin'; };
+  const game = `<form class="card login" id="gf"><div class="veb">Тільки для своїх</div><h1 class="vh" style="font-size:28px">Вхід через NovaRP</h1><label>Ігровий логін</label><input name="login" autocomplete="username" required><label>Пароль від гри</label><input name="password" type="password" autocomplete="current-password" required><button class="btn" style="width:100%">Увійти</button><div class="hint">Доступ і ранг підтягуються з гри автоматично при кожному вході.</div></form>`;
+  const local = `<form class="card login" id="lf" ${m.nova ? 'style="margin-top:18px"' : ''}><div class="veb">${m.nova ? 'Службовий вхід' : 'Тільки для своїх'}</div><h1 class="vh" style="font-size:${m.nova ? 20 : 28}px">${m.nova ? 'Локальний акаунт' : 'Вхід'}</h1><label>Логін</label><input name="login" autocomplete="username"><label>Пароль</label><input name="password" type="password"><button class="btn ${m.nova ? 'gh' : ''}" style="width:100%">Увійти</button>${m.nova ? '' : '<div class="hint">Демо: demo_boss, demo_ballas, demo_don, demo_admin — пароль demo1234.</div>'}</form>`;
+  app.innerHTML = (m.nova ? game : '') + (m.local || !m.nova ? local : `<details style="max-width:420px;margin:14px auto"><summary class="meta">Службовий вхід</summary>${local}</details>`);
+  $('#lf').onsubmit = async e => { e.preventDefault(); try { await api('/api/login', form(e.target)); await done(); } catch (x) { toast(x.message); } };
+  if (m.nova) $('#gf').onsubmit = async e => { e.preventDefault(); try { const r = await api('/api/login/game', form(e.target));
+    if (!r.choose) return await done();
+    app.innerHTML = `<div class="card login"><div class="veb">Кілька персонажів</div><h1 class="vh" style="font-size:24px">Оберіть персонажа</h1>${r.choose.map(c => `<button class="btn gh" style="width:100%;margin:6px 0" data-id="${c.id}">${esc(c.name)} · ${esc(c.faction)} · ранг ${c.rank}</button>`).join('')}</div>`;
+    app.querySelectorAll('[data-id]').forEach(b => b.onclick = async () => { try { await api('/api/login/char', { ticket: r.ticket, char_id: +b.dataset.id }); await done(); } catch (x) { toast(x.message); pageLogin(); } });
+  } catch (x) { toast(x.message); } };
 }
 async function pageCrew() {
   if (!ME.user.group_id) { app.innerHTML = '<div class="card"><h3>Без угруповання</h3><div class="sub">Адмін без угруповання — відкрийте Адмінпанель.</div></div>'; return; }
